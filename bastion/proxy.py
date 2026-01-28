@@ -37,11 +37,15 @@ class SSHProxy:
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             
-            # Connect with timeout
+            # Load bastion private key from config
+            pkey = paramiko.RSAKey.from_private_key_file(Config.HOST_KEY_FILE)
+            
+            # Connect with timeout using private key
             ssh_client.connect(
                 hostname=target.host,
                 port=target.port,
                 username=target.user,
+                pkey=pkey,
                 timeout=Config.CONNECTION_TIMEOUT,
                 allow_agent=False,
                 look_for_keys=False,
