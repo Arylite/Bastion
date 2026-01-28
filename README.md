@@ -15,7 +15,7 @@ A Python-based SSH server that acts as a dynamic proxy, routing connections to t
 
 ### Installation
 
-See [this](INSTALL.MD).
+See INSTALL.MD.
 
 ### Configuration
 

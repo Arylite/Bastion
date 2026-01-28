@@ -142,3 +142,5 @@ black bastion/
 # Lint code
 flake8 bastion/
 ```
+
+PS : For OpenRC see the README inside the openrc directory.

@@ -1,0 +1,98 @@
+#!/sbin/openrc-run
+# SSH Dynamic Bastion Server OpenRC init script
+
+name="SSH Dynamic Bastion Server"
+description="SSH Dynamic Bastion Server for secure remote access"
+
+# Configuration
+: ${BASTION_USER:=bastion}
+: ${BASTION_GROUP:=bastion}
+: ${BASTION_HOME:=/opt/bastion-ssh}
+: ${BASTION_VENV:=/opt/bastion-ssh/venv}
+: ${BASTION_PIDFILE:=/var/run/bastion.pid}
+: ${BASTION_LOGFILE:=/var/log/bastion.log}
+
+# OpenRC configuration
+command="${BASTION_VENV}/bin/python"
+command_args="-m bastion.main start"
+command_background="yes"
+command_user="${BASTION_USER}:${BASTION_GROUP}"
+pidfile="${BASTION_PIDFILE}"
+directory="${BASTION_HOME}"
+
+# Output redirection
+output_log="${BASTION_LOGFILE}"
+error_log="${BASTION_LOGFILE}"
+
+# Dependencies
+depend() {
+    need net
+    use logger dns
+    after firewall
+}
+
+# Pre-start checks
+start_pre() {
+    # Check if virtual environment exists
+    if [ ! -f "${BASTION_VENV}/bin/python" ]; then
+        eerror "Python virtual environment not found at ${BASTION_VENV}"
+        return 1
+    fi
+
+    # Check if bastion module exists
+    if ! "${BASTION_VENV}/bin/python" -c "import bastion.main" 2>/dev/null; then
+        eerror "Bastion module not found or not importable"
+        return 1
+    fi
+
+    # Create PID file directory if it doesn't exist
+    checkpath --directory --owner "${BASTION_USER}:${BASTION_GROUP}" --mode 0755 "$(dirname "${BASTION_PIDFILE}")"
+    
+    # Create log file directory if it doesn't exist
+    checkpath --directory --owner "${BASTION_USER}:${BASTION_GROUP}" --mode 0755 "$(dirname "${BASTION_LOGFILE}")"
+    
+    # Ensure log file exists and has correct permissions
+    checkpath --file --owner "${BASTION_USER}:${BASTION_GROUP}" --mode 0644 "${BASTION_LOGFILE}"
+
+    return 0
+}
+
+# Reload function
+reload() {
+    ebegin "Reloading ${name}"
+    if [ -f "${pidfile}" ]; then
+        kill -HUP "$(cat "${pidfile}")"
+        eend $?
+    else
+        eerror "PID file not found, service may not be running"
+        return 1
+    fi
+}
+
+# Status function with additional info
+status() {
+    if [ -f "${pidfile}" ]; then
+        local pid="$(cat "${pidfile}")"
+        if kill -0 "${pid}" 2>/dev/null; then
+            einfo "${name} is running (PID ${pid})"
+            return 0
+        else
+            eerror "${name} is not running (stale PID file)"
+            return 1
+        fi
+    else
+        eerror "${name} is not running"
+        return 3
+    fi
+}
+
+# Extra commands
+extra_commands="reload status"
+extra_started_commands="reload"
+
+# Cleanup on stop
+stop_post() {
+    # Remove stale PID file if it exists
+    [ -f "${pidfile}" ] && rm -f "${pidfile}"
+    return 0
+}
