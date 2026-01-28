@@ -23,6 +23,7 @@ VENV_PATH="${BASTION_HOME}/venv"
 CONFIG_DIR="/etc/bastion"
 LOG_DIR="/var/log/bastion"
 DATA_DIR="/var/lib/bastion"
+ENV_FILE="${BASTION_HOME}/.env"
 
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +39,7 @@ VERBOSE=false
 print_banner() {
     echo -e "${CYAN}"
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║           SSH Dynamic Bastion Server Installer              ║"
+    echo "║                  Bastion Server Installer                    ║"
     echo "║                     Universal Edition                        ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -499,38 +500,178 @@ install_openrc_service() {
     local init_script="/etc/init.d/$SERVICE_NAME"
     local conf_file="/etc/conf.d/$SERVICE_NAME"
     
-    # Copy and customize init script
-    if [[ -f "$SCRIPT_DIR/openrc/bastion" ]]; then
-        execute "cp $SCRIPT_DIR/openrc/bastion $init_script"
-        execute "chmod +x $init_script"
-        
-        # Update paths in init script
-        execute "sed -i 's|BASTION_HOME:=.*|BASTION_HOME:=$BASTION_HOME|g' $init_script"
-        execute "sed -i 's|BASTION_VENV:=.*|BASTION_VENV:=$VENV_PATH|g' $init_script"
-        execute "sed -i 's|BASTION_USER:=.*|BASTION_USER:=$BASTION_USER|g' $init_script"
-        execute "sed -i 's|BASTION_GROUP:=.*|BASTION_GROUP:=$BASTION_GROUP|g' $init_script"
-    else
-        log_error "OpenRC init script not found at $SCRIPT_DIR/openrc/bastion"
-        exit 1
+    # Create OpenRC init script
+    log_info "Creating OpenRC init script..."
+    cat > "$init_script" << 'EOF'
+#!/sbin/openrc-run
+# SSH Dynamic Bastion Server OpenRC init script
+
+name="SSH Dynamic Bastion Server"
+description="SSH Dynamic Bastion Server for secure remote access"
+
+# Load configuration from /etc/conf.d/bastion
+: ${BASTION_USER:=bastion}
+: ${BASTION_GROUP:=bastion}
+: ${BASTION_HOME:=/opt/bastion-ssh}
+: ${BASTION_VENV:=/opt/bastion-ssh/venv}
+: ${BASTION_PIDFILE:=/var/run/bastion.pid}
+: ${BASTION_LOGFILE:=/var/log/bastion/bastion.log}
+: ${BASTION_ENV_FILE:=/opt/bastion-ssh/.env}
+
+# OpenRC configuration
+command="${BASTION_VENV}/bin/python"
+command_args="-m bastion.main start"
+command_background="yes"
+command_user="${BASTION_USER}:${BASTION_GROUP}"
+pidfile="${BASTION_PIDFILE}"
+directory="${BASTION_HOME}"
+
+# Output redirection
+output_log="${BASTION_LOGFILE}"
+error_log="${BASTION_LOGFILE}"
+
+# Dependencies
+depend() {
+    need net
+    use logger dns
+    after firewall
+}
+
+# Pre-start checks
+start_pre() {
+    # Check if virtual environment exists
+    if [ ! -f "${BASTION_VENV}/bin/python" ]; then
+        eerror "Python virtual environment not found at ${BASTION_VENV}"
+        return 1
     fi
-    
-    # Copy and customize config file
-    if [[ -f "$SCRIPT_DIR/openrc/bastion.conf" ]]; then
-        execute "cp $SCRIPT_DIR/openrc/bastion.conf $conf_file"
-        
-        # Update configuration
-        execute "sed -i 's|BASTION_HOME=.*|BASTION_HOME=\"$BASTION_HOME\"|g' $conf_file"
-        execute "sed -i 's|BASTION_VENV=.*|BASTION_VENV=\"$VENV_PATH\"|g' $conf_file"
-        execute "sed -i 's|BASTION_USER=.*|BASTION_USER=\"$BASTION_USER\"|g' $conf_file"
-        execute "sed -i 's|BASTION_GROUP=.*|BASTION_GROUP=\"$BASTION_GROUP\"|g' $conf_file"
-        execute "sed -i 's|BASTION_LOGFILE=.*|BASTION_LOGFILE=\"$LOG_DIR/bastion.log\"|g' $conf_file"
-    else
-        log_error "OpenRC config file not found at $SCRIPT_DIR/openrc/bastion.conf"
-        exit 1
+
+    # Check if bastion module exists
+    if ! "${BASTION_VENV}/bin/python" -c "import bastion.main" 2>/dev/null; then
+        eerror "Bastion module not found or not importable"
+        return 1
     fi
+
+    # Create PID file directory if it doesn't exist
+    checkpath --directory --owner "${BASTION_USER}:${BASTION_GROUP}" --mode 0755 "$(dirname "${BASTION_PIDFILE}")"
     
+    # Create log file directory if it doesn't exist
+    checkpath --directory --owner "${BASTION_USER}:${BASTION_GROUP}" --mode 0755 "$(dirname "${BASTION_LOGFILE}")"
+    
+    # Create log file if it doesn't exist
+    checkpath --file --owner "${BASTION_USER}:${BASTION_GROUP}" --mode 0644 "${BASTION_LOGFILE}"
+    
+    # Check if env file exists
+    if [ ! -f "${BASTION_ENV_FILE}" ]; then
+        ewarn "Environment file not found at ${BASTION_ENV_FILE}"
+    fi
+
+    einfo "Starting ${description}..."
+}
+
+# Post-start checks
+start_post() {
+    # Wait a moment for the service to start
+    sleep 2
+    
+    # Check if the service actually started
+    if [ -f "${BASTION_PIDFILE}" ]; then
+        local pid=$(cat "${BASTION_PIDFILE}")
+        if kill -0 "$pid" 2>/dev/null; then
+            einfo "${description} started successfully with PID $pid"
+        else
+            eerror "${description} failed to start"
+            return 1
+        fi
+    else
+        eerror "PID file not created"
+        return 1
+    fi
+}
+
+# Pre-stop function
+stop_pre() {
+    einfo "Stopping ${description}..."
+}
+
+# Post-stop cleanup
+stop_post() {
+    # Clean up PID file if it still exists
+    if [ -f "${BASTION_PIDFILE}" ]; then
+        rm -f "${BASTION_PIDFILE}"
+    fi
+    einfo "${description} stopped"
+}
+
+# Reload function
+reload() {
+    einfo "Reloading ${description}..."
+    if [ -f "${BASTION_PIDFILE}" ]; then
+        local pid=$(cat "${BASTION_PIDFILE}")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -HUP "$pid"
+            einfo "Reload signal sent to ${description}"
+        else
+            eerror "${description} is not running"
+            return 1
+        fi
+    else
+        eerror "PID file not found"
+        return 1
+    fi
+}
+
+# Status function
+status() {
+    if [ -f "${BASTION_PIDFILE}" ]; then
+        local pid=$(cat "${BASTION_PIDFILE}")
+        if kill -0 "$pid" 2>/dev/null; then
+            einfo "${description} is running with PID $pid"
+        else
+            eerror "${description} is not running (PID file exists but process is dead)"
+            return 1
+        fi
+    else
+        einfo "${description} is not running"
+        return 1
+    fi
+}
+EOF
+
+    # Make init script executable
+    execute "chmod +x $init_script"
+    
+    # Create configuration file
+    log_info "Creating OpenRC configuration file..."
+    cat > "$conf_file" << EOF
+# Configuration file for SSH Dynamic Bastion Server (OpenRC)
+
+# User and group to run the service as
+BASTION_USER="$BASTION_USER"
+BASTION_GROUP="$BASTION_GROUP"
+
+# Installation directory
+BASTION_HOME="$BASTION_HOME"
+
+# Python virtual environment path
+BASTION_VENV="$VENV_PATH"
+
+# PID file location
+BASTION_PIDFILE="/var/run/bastion.pid"
+
+# Log file location
+BASTION_LOGFILE="$LOG_DIR/bastion.log"
+
+# Environment file location
+BASTION_ENV_FILE="$ENV_FILE"
+
+# Additional environment variables can be set here
+# export BASTION_DEBUG="false"
+# export BASTION_PORT="2222"
+EOF
+
+    # Add service to default runlevel
     execute "rc-update add $SERVICE_NAME default"
-    log_info "OpenRC service installed successfully"
+    log_info "OpenRC service installed and enabled successfully"
 }
 
 # Install SysV service
@@ -648,12 +789,14 @@ install_service() {
 
 # Create sample configuration
 create_config() {
-    log_step "Creating sample configuration"
+    log_step "Creating configuration files"
     
     local config_file="$CONFIG_DIR/config.yml"
+    local env_file="$ENV_FILE"
     
+    # Create YAML config file
     if [[ ! -f "$config_file" ]] || [[ "$FORCE" == "true" ]]; then
-        log_info "Creating sample configuration..."
+        log_info "Creating sample YAML configuration..."
         
         cat > "$config_file" << EOF
 # SSH Dynamic Bastion Server Configuration
@@ -667,13 +810,11 @@ server:
     - "$BASTION_HOME/keys/ssh_host_ecdsa_key"
     - "$BASTION_HOME/keys/ssh_host_ed25519_key"
 
-# Database settings (PostgreSQL)
+# Database settings (SQLite for simplicity, change to PostgreSQL in production)
 database:
-  host: "localhost"
-  port: 5432
-  name: "bastion"
-  user: "bastion_user"
-  password: "bastion_password"
+  url: "sqlite:////$DATA_DIR/bastion.db"
+  # For PostgreSQL, use:
+  # url: "postgresql://bastion_user:bastion_password@localhost:5432/bastion"
   
 # Logging settings
 logging:
@@ -685,7 +826,8 @@ logging:
 # Security settings
 security:
   max_connections: 100
-  connection_timeout: 30
+  max_connections_per_ip: 5
+  connection_timeout: 300
   idle_timeout: 600
   max_auth_attempts: 3
 
@@ -698,8 +840,55 @@ EOF
         execute "chown $BASTION_USER:$BASTION_GROUP $config_file"
         execute "chmod 640 $config_file"
     else
-        log_debug "Configuration file already exists"
+        log_debug "YAML configuration file already exists"
     fi
+    
+    # Create .env file
+    if [[ ! -f "$env_file" ]] || [[ "$FORCE" == "true" ]]; then
+        log_info "Creating environment configuration..."
+        
+        # Copy from example if it exists
+        if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
+            execute "cp $SCRIPT_DIR/.env.example $env_file"
+        else
+            # Create from template
+            cat > "$env_file" << EOF
+# Bastion SSH Configuration
+BASTION_BIND=0.0.0.0
+BASTION_PORT=2222
+
+# Database Configuration  
+DB_URL=sqlite:///$DATA_DIR/bastion.db
+
+# Logging Configuration
+LOG_LEVEL=INFO
+LOG_FILE=$LOG_DIR/bastion.log
+
+# Security Configuration
+MAX_CONNECTIONS_PER_IP=5
+CONNECTION_TIMEOUT=300
+
+# SSH Configuration
+HOST_KEY_FILE=$BASTION_HOME/keys/ssh_host_rsa_key
+HOST_KEY_DIR=$BASTION_HOME/keys
+
+# Application Configuration
+BASTION_HOME=$BASTION_HOME
+BASTION_CONFIG=$CONFIG_DIR/config.yml
+BASTION_DATA_DIR=$DATA_DIR
+EOF
+        fi
+        
+        execute "chown $BASTION_USER:$BASTION_GROUP $env_file"
+        execute "chmod 640 $env_file"
+    else
+        log_debug "Environment file already exists"
+    fi
+    
+    # Create database directory for SQLite
+    execute "mkdir -p $DATA_DIR"
+    execute "chown $BASTION_USER:$BASTION_GROUP $DATA_DIR"
+    execute "chmod 750 $DATA_DIR"
 }
 
 # Setup firewall rules
@@ -768,51 +957,85 @@ print_instructions() {
     log_step "Installation completed successfully!"
     echo
     echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                    POST-INSTALLATION INSTRUCTIONS                ║${NC}"
+    echo -e "${GREEN}║                    POST-INSTALLATION INSTRUCTIONS                 ║${NC}"
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
     echo
-    echo -e "${YELLOW}1. Configure the application:${NC}"
-    echo -e "   Edit: ${CYAN}$CONFIG_DIR/config.yml${NC}"
-    echo -e "   Set up database connection and other settings"
+    echo -e "${YELLOW}1. Configuration files:${NC}"
+    echo -e "   YAML Config: ${CYAN}$CONFIG_DIR/config.yml${NC}"
+    echo -e "   Environment: ${CYAN}$ENV_FILE${NC}"
+    echo -e "   Edit these files to customize the bastion server"
     echo
-    echo -e "${YELLOW}2. Setup database (PostgreSQL):${NC}"
+    echo -e "${YELLOW}2. Database setup:${NC}"
+    echo -e "   ${GREEN}SQLite (default):${NC} Already configured in $DATA_DIR/bastion.db"
+    echo -e "   ${GREEN}PostgreSQL (optional):${NC}"
     echo -e "   ${CYAN}sudo -u postgres createdb bastion${NC}"
     echo -e "   ${CYAN}sudo -u postgres createuser bastion_user${NC}"
     echo -e "   ${CYAN}sudo -u postgres psql -c \"ALTER USER bastion_user WITH PASSWORD 'bastion_password';\"${NC}"
     echo -e "   ${CYAN}sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE bastion TO bastion_user;\"${NC}"
+    echo -e "   Then update DB_URL in ${CYAN}$ENV_FILE${NC}"
     echo
     echo -e "${YELLOW}3. Start the service:${NC}"
     case "$INIT_SYSTEM" in
         systemd)
-            echo -e "   ${CYAN}sudo systemctl start $SERVICE_NAME${NC}"
-            echo -e "   ${CYAN}sudo systemctl status $SERVICE_NAME${NC}"
+            echo -e "\t${CYAN}sudo systemctl start $SERVICE_NAME${NC}"
+            echo -e "\t${CYAN}sudo systemctl status $SERVICE_NAME${NC}"
+            echo -e "\t${CYAN}sudo journalctl -u $SERVICE_NAME -f${NC}  # View logs"
             ;;
         openrc)
-            echo -e "   ${CYAN}sudo rc-service $SERVICE_NAME start${NC}"
-            echo -e "   ${CYAN}sudo rc-service $SERVICE_NAME status${NC}"
+            echo -e "\t${CYAN}sudo rc-service $SERVICE_NAME start${NC}"
+            echo -e "\t${CYAN}sudo rc-service $SERVICE_NAME status${NC}"
+            echo -e "\t${CYAN}tail -f $LOG_DIR/bastion.log${NC}  # View logs"
             ;;
         sysv)
-            echo -e "   ${CYAN}sudo service $SERVICE_NAME start${NC}"
-            echo -e "   ${CYAN}sudo service $SERVICE_NAME status${NC}"
+            echo -e "\t${CYAN}sudo service $SERVICE_NAME start${NC}"
+            echo -e "\t${CYAN}sudo service $SERVICE_NAME status${NC}"
+            echo -e "\t${CYAN}tail -f $LOG_DIR/bastion.log${NC}  # View logs"
             ;;
         *)
-            echo -e "   ${CYAN}sudo $VENV_PATH/bin/python -m bastion.main start${NC}"
+            echo -e "\t${CYAN}sudo -u $BASTION_USER $VENV_PATH/bin/python -m bastion.main start${NC}"
             ;;
     esac
     echo
     echo -e "${YELLOW}4. Add SSH keys to the database:${NC}"
-    echo -e "   ${CYAN}sudo -u $BASTION_USER $VENV_PATH/bin/python $BASTION_HOME/setup.py${NC}"
+    echo -e "\t${CYAN}sudo -u $BASTION_USER $VENV_PATH/bin/python $BASTION_HOME/setup.py${NC}"
     echo
     echo -e "${YELLOW}5. Test the connection:${NC}"
-    echo -e "   ${CYAN}ssh -p 2222 username@$(hostname -I | awk '{print $1}')${NC}"
+    echo -e "\t${CYAN}ssh -p 2222 username@$(hostname -I | awk '{print $1}' 2>/dev/null || echo 'localhost')${NC}"
     echo
-    echo -e "${GREEN}Installation directory: ${CYAN}$BASTION_HOME${NC}"
-    echo -e "${GREEN}Configuration directory: ${CYAN}$CONFIG_DIR${NC}"
-    echo -e "${GREEN}Log directory: ${CYAN}$LOG_DIR${NC}"
-    echo -e "${GREEN}Service user: ${CYAN}$BASTION_USER${NC}"
+    echo -e "${YELLOW}6. Service management commands:${NC}"
+    case "$INIT_SYSTEM" in
+        systemd)
+            echo -e "   Start:   ${CYAN}sudo systemctl start $SERVICE_NAME${NC}"
+            echo -e "   Stop:    ${CYAN}sudo systemctl stop $SERVICE_NAME${NC}"
+            echo -e "   Restart: ${CYAN}sudo systemctl restart $SERVICE_NAME${NC}"
+            echo -e "   Status:  ${CYAN}sudo systemctl status $SERVICE_NAME${NC}"
+            ;;
+        openrc)
+            echo -e "   Start:   ${CYAN}sudo rc-service $SERVICE_NAME start${NC}"
+            echo -e "   Stop:    ${CYAN}sudo rc-service $SERVICE_NAME stop${NC}"
+            echo -e "   Restart: ${CYAN}sudo rc-service $SERVICE_NAME restart${NC}"
+            echo -e "   Status:  ${CYAN}sudo rc-service $SERVICE_NAME status${NC}"
+            echo -e "   Reload:  ${CYAN}sudo rc-service $SERVICE_NAME reload${NC}"
+            ;;
+        sysv)
+            echo -e "   Start:   ${CYAN}sudo service $SERVICE_NAME start${NC}"
+            echo -e "   Stop:    ${CYAN}sudo service $SERVICE_NAME stop${NC}"
+            echo -e "   Restart: ${CYAN}sudo service $SERVICE_NAME restart${NC}"
+            echo -e "   Status:  ${CYAN}sudo service $SERVICE_NAME status${NC}"
+            ;;
+    esac
     echo
-    echo -e "${GREEN}For support and documentation, visit:${NC}"
-    echo -e "${CYAN}https://github.com/your-repo/ssh-bastion${NC}"
+    echo -e "${GREEN}Installation details:${NC}"
+    echo -e "${GREEN}├─ Application directory: ${CYAN}$BASTION_HOME${NC}"
+    echo -e "${GREEN}├─ Configuration directory: ${CYAN}$CONFIG_DIR${NC}"
+    echo -e "${GREEN}├─ Environment file: ${CYAN}$ENV_FILE${NC}"
+    echo -e "${GREEN}├─ Log directory: ${CYAN}$LOG_DIR${NC}"
+    echo -e "${GREEN}├─ Data directory: ${CYAN}$DATA_DIR${NC}"
+    echo -e "${GREEN}├─ Service user: ${CYAN}$BASTION_USER${NC}"
+    echo -e "${GREEN}└─ Init system: ${CYAN}$INIT_SYSTEM${NC}"
+    echo
+    echo -e "${GREEN}Documentation and support:${NC}"
+    echo -e "${CYAN}https://github.com/Arylite/Bastion${NC}"
     echo
 }
 
@@ -873,11 +1096,11 @@ main() {
     detect_package_manager
     
     log_info "Installation configuration:"
-    log_info "  User: $BASTION_USER"
-    log_info "  Group: $BASTION_GROUP"
-    log_info "  Directory: $BASTION_HOME"
-    log_info "  Init system: $INIT_SYSTEM"
-    log_info "  Package manager: $PKG_MANAGER"
+    log_info "\tUser: $BASTION_USER"
+    log_info "\tGroup: $BASTION_GROUP"
+    log_info "\tDirectory: $BASTION_HOME"
+    log_info "\tInit system: $INIT_SYSTEM"
+    log_info "\tPackage manager: $PKG_MANAGER"
     echo
     
     if [[ "$DRY_RUN" != "true" ]]; then
